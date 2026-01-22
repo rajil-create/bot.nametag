@@ -1,5 +1,5 @@
 streamlit
 pandas
-pypdf
-reportlab
 pdfplumber
+reportlab
+pypdf>=4.0.0
