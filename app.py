@@ -7,123 +7,119 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ContentStream, TextStringObject
 import io
 
-st.set_page_config(page_title="Production Nametag Pro", layout="wide")
-
-# Paramètre de décalage demandé : 0.5 inch
+st.set_page_config(page_title="Production Nametag PRO", layout="wide")
 GAP = 0.5 * inch 
 
-def clean_pdf_text(page, text_to_hide):
-    """ Supprime techniquement le texte du flux binaire du PDF """
+def full_clean_pdf(page, target):
+    """ Supprime radicalement toute mention du texte cible dans le code du PDF """
     if "/Contents" in page:
         contents = page.get_contents()
         if contents:
-            content_stream = ContentStream(contents, page.pdf)
-            for operands, operator in content_stream.operations:
+            stream = ContentStream(contents, page.pdf)
+            for operands, operator in stream.operations:
                 if operator in [b"Tj", b"TJ"]:
                     for i, op in enumerate(operands):
-                        if isinstance(op, TextStringObject) and text_to_hide.lower() in op.lower():
-                            operands[i] = TextStringObject("") 
-            page.set_contents(content_stream)
+                        if isinstance(op, TextStringObject) and target.lower() in op.lower():
+                            operands[i] = TextStringObject("")
+            page.set_contents(stream)
 
-def get_metrics(template_bytes, search_term):
-    """ Détecte l'emplacement exact pour l'alignement """
-    with pdfplumber.open(io.BytesIO(template_bytes)) as pdf:
-        page = pdf.pages[0]
-        words = page.extract_words()
-        for w in words:
-            if search_term.lower() in w['text'].lower():
-                return {
-                    "cx": (w['x0'] + w['x1']) / 2,
-                    "y": page.height - w['bottom'],
-                    "w_orig": page.width,
-                    "h_orig": page.height
-                }
+def load_data(file):
+    """ Charge le CSV avec gestion robuste des accents français """
+    for enc in ['utf-8', 'latin-1', 'cp1252']:
+        try:
+            file.seek(0)
+            if file.name.endswith('.csv'):
+                return pd.read_csv(file, encoding=enc)
+            else:
+                return pd.read_excel(file)
+        except:
+            continue
     return None
 
-st.title("🛡️ Bot de Gravure Professionnel")
+st.title("🛡️ Système de Production de Badges")
 
-# --- INTERFACE DE SAISIE ---
 with st.sidebar:
-    st.header("1. Paramètres d'Impression")
-    target_text = st.text_input("Texte à faire disparaître (ex: Scott)", "Scott")
-    nb_badges = st.number_input("Nombre de badges sur la planche", min_value=1, value=4)
-    cols = st.slider("Nombre de colonnes", 1, 3, 2)
-    f_size = st.number_input("Taille de la police", value=18)
+    st.header("Configuration")
+    target_to_fix = st.text_input("Texte à EFFACER (ex: Scott)", "Scott")
+    nb_total = st.number_input("Nombre de badges", value=6)
+    cols = st.slider("Colonnes", 1, 3, 2)
+    font_size = st.number_input("Taille Nom", value=20)
     
     st.divider()
-    st.header("2. Source des Noms")
-    mode = st.radio("Choisir la méthode :", ["Saisie Manuelle (Taper)", "Upload Fichier (Excel/CSV)"])
+    mode = st.radio("Méthode d'entrée :", ["Taper les noms", "Uploader CSV/Excel"])
 
-# --- PRÉPARATION DES DONNÉES ---
-data_list = []
-if mode == "Saisie Manuelle (Taper)":
-    raw_input = st.text_area("Tapez ici : Prénom, Nom (un par ligne)", placeholder="Jean, Dupont\nMarie, Durand")
-    if raw_input:
-        for line in raw_input.split('\n'):
+# --- GESTION DES DONNÉES ---
+people = []
+if mode == "Taper les noms":
+    raw_text = st.text_area("Entrez: Prénom, Nom (un par ligne)", height=200, placeholder="Marc, Tremblay\nSophie, Gagnon")
+    if raw_text:
+        for line in raw_text.split('\n'):
             if ',' in line:
-                parts = line.split(',')
-                data_list.append({"Prénom": parts[0].strip(), "Nom": parts[1].strip()})
+                p = line.split(',')
+                people.append({"Prénom": p[0].strip(), "Nom": p[1].strip()})
 else:
-    file = st.file_uploader("Uploader votre Excel ou CSV", type=["xlsx", "csv"])
-    if file:
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
+    f = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
+    if f:
+        df = load_data(f)
+        if df is not None:
+            df.columns = [c.strip().capitalize() for c in df.columns]
+            people = df.to_dict('records')
         else:
-            df = pd.read_excel(file, engine='openpyxl')
-        data_list = df.to_dict('records')
+            st.error("Impossible de lire le fichier. Vérifiez le format.")
 
-# --- MOTEUR DE GÉNÉRATION ---
-template_pdf = st.file_uploader("Uploader le Gabarit PDF (celui avec Scott)", type="pdf")
+# --- GÉNÉRATION ---
+tpl_file = st.file_uploader("Gabarit PDF (avec Scott)", type="pdf")
 
-if template_pdf and st.button("🚀 Générer la planche de badges"):
-    m = get_metrics(template_pdf.getvalue(), target_text)
-    
-    if not m:
-        st.error(f"Erreur : Le mot '{target_text}' n'est pas détecté dans le PDF.")
-    else:
-        # Calcul de la planche
-        rows = (nb_badges + cols - 1) // cols
-        p_width = (m['w_orig'] * cols) + (GAP * (cols - 1)) + 50
-        p_height = (m['h_orig'] * rows) + (GAP * (rows - 1)) + 50
+if tpl_file and st.button("🚀 Générer la Planche"):
+    with pdfplumber.open(io.BytesIO(tpl_file.getvalue())) as pdf:
+        p0 = pdf.pages[0]
+        # Détection position Scott
+        found = False
+        for w in p0.extract_words():
+            if target_to_fix.lower() in w['text'].lower():
+                mx = {"cx": (w['x0']+w['x1'])/2, "y": p0.height-w['bottom'], "w": p0.width, "h": p0.height}
+                found = True
+                break
         
-        # Préparation PDF
-        reader = PdfReader(io.BytesIO(template_pdf.getvalue()))
+    if not found:
+        st.error(f"Le mot '{target_to_fix}' n'a pas été trouvé. Vérifiez l'orthographe.")
+    else:
+        # Calcul page de sortie
+        rows = (nb_total + cols - 1) // cols
+        pw = (mx['w'] * cols) + (GAP * (cols - 1)) + 40
+        ph = (mx['h'] * rows) + (GAP * (rows - 1)) + 40
+        
+        reader = PdfReader(io.BytesIO(tpl_file.getvalue()))
         tpl_page = reader.pages[0]
-        clean_pdf_text(tpl_page, target_text) # Nettoyage de "Scott"
+        full_clean_pdf(tpl_page, target_to_fix) # Suppression réelle de "Scott"
         
         writer = PdfWriter()
-        output_page = writer.add_blank_page(width=p_width, height=p_height)
+        out_page = writer.add_blank_page(width=pw, height=ph)
         
         packet = io.BytesIO()
-        can = canvas.Canvas(packet, pagesize=(p_width, p_height))
+        can = canvas.Canvas(packet, pagesize=(pw, ph))
         
-        for i in range(nb_badges):
-            c = i % cols
-            r = i // cols
+        for i in range(nb_total):
+            c, r = i % cols, i // cols
+            dx = 20 + c * (mx['w'] + GAP)
+            dy = ph - 20 - (r + 1) * mx['h'] - (r * GAP)
             
-            x_off = 25 + c * (m['w_orig'] + GAP)
-            y_off = p_height - 25 - (r + 1) * m['h_orig'] - (r * GAP)
+            # Fond nettoyé
+            out_page.merge_transformed_page(tpl_page, [1, 0, 0, 1, dx, dy])
             
-            # 1. Fusion du fond nettoyé
-            output_page.merge_transformed_page(tpl_page, [1, 0, 0, 1, x_off, y_off])
-            
-            # 2. Ajout du nouveau texte au même endroit
-            if i < len(data_list):
-                p = data_list[i]
-                # Gestion flexible des noms de colonnes
-                nom = str(p.get('Nom', p.get('nom', ''))).upper()
-                pre = str(p.get('Prénom', p.get('prenom', '')))
-                txt = f"{pre} {nom}".strip()
-                
-                can.setFont("Helvetica-Bold", f_size)
-                can.drawCentredString(x_off + m['cx'], y_off + m['y'], txt)
+            # Nouveau texte
+            if i < len(people):
+                pers = people[i]
+                nom = str(pers.get('Nom', '')).upper()
+                pre = str(pers.get('Prénom', ''))
+                can.setFont("Helvetica-Bold", font_size)
+                can.drawCentredString(dx + mx['cx'], dy + mx['y'], f"{pre} {nom}")
         
         can.save()
         packet.seek(0)
-        output_page.merge_page(PdfReader(packet).pages[0])
+        out_page.merge_page(PdfReader(packet).pages[0])
         
-        final_pdf = io.BytesIO()
-        writer.write(final_pdf)
-        
-        st.success("Planche générée avec succès !")
-        st.download_button("📥 Télécharger le PDF prêt à imprimer", final_pdf.getvalue(), "planche_badges_final.pdf")
+        final = io.BytesIO()
+        writer.write(final)
+        st.success("Planche prête !")
+        st.download_button("📥 Télécharger PDF de Production", final.getvalue(), "badges_prod.pdf")
