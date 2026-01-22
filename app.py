@@ -3,96 +3,160 @@ import pandas as pd
 from reportlab.pdfgen import canvas
 from pypdf import PdfReader, PdfWriter
 import io
-import zipfile
 
-st.set_page_config(page_title="Bot Graveur Pro", layout="wide")
-st.title("🛡️ Bot de Gravure (Manuel ou CSV)")
+# --- CONFIGURATION DE LA PAGE ---
+st.set_page_config(page_title="Générateur Badges Pro", layout="wide")
+st.title("🛡️ Générateur de Badges (PDF Unique)")
 
-# --- BARRE LATÉRALE ---
-st.sidebar.header("🔍 Options")
-mode = st.sidebar.radio("Choisir la source :", ["Fichier CSV", "Saisie Manuelle"])
+# --- BARRE LATÉRALE (RÉGLAGES) ---
+st.sidebar.header("1. Source des données")
+mode = st.sidebar.radio("Choisir :", ["Fichier Excel/CSV", "Saisie Manuelle"])
 
-st.sidebar.header("⚙️ Réglages Cache")
-c_x = st.sidebar.slider("Position X", 0, 500, 135)
-c_y = st.sidebar.slider("Position Y", 0, 300, 40)
+st.sidebar.header("2. Positionnement (Cache)")
+st.sidebar.info("Ajustez le carré blanc pour cacher 'Richard Oliva'")
+c_x = st.sidebar.slider("X (Horizontal)", 0, 500, 135)
+c_y = st.sidebar.slider("Y (Vertical)", 0, 300, 40)
 c_w = st.sidebar.slider("Largeur", 10, 300, 250)
 c_h = st.sidebar.slider("Hauteur", 10, 100, 60)
 
-# --- ZONE DE CHARGEMENT MODÈLE ---
-pdf_file = st.file_uploader("1. Charger le Modèle PDF", type="pdf")
+# --- ZONE DE CHARGEMENT DU MODÈLE ---
+col_main, col_preview = st.columns([2, 1])
+with col_main:
+    pdf_template = st.file_uploader("📂 Chargez le Modèle PDF (celui avec Richard Oliva)", type="pdf")
 
-def create_badge(template_bytes, n, p, t):
+# --- FONCTION DE GÉNÉRATION D'UNE PAGE ---
+def create_page(template_bytes, nom, prenom, titre):
+    # 1. Lire le template
     reader = PdfReader(io.BytesIO(template_bytes))
     page = reader.pages[0]
+    
+    # 2. Créer le calque (Overlay) avec ReportLab
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page.mediabox.width, page.mediabox.height))
-    can.setFillColorRGB(1, 1, 1) # Cache blanc
+    
+    # DESSIN DU CACHE BLANC
+    can.setFillColorRGB(1, 1, 1) 
     can.rect(c_x, c_y, c_w, c_h, fill=1, stroke=0)
-    can.setFillColorRGB(0, 0, 0) # Texte noir
-    can.setFont("Helvetica-Bold", 18)
-    can.drawString(c_x + 5, c_y + 35, f"{p} {n}")
-    can.setFont("Helvetica", 12)
-    can.drawString(c_x + 5, c_y + 15, str(t))
+    
+    # NETTOYAGE DES DONNÉES (Eviter les "nan" ou vides)
+    t_nom = str(nom).strip() if pd.notna(nom) and str(nom).lower() != 'nan' else ""
+    t_pre = str(prenom).strip() if pd.notna(prenom) and str(prenom).lower() != 'nan' else ""
+    t_titre = str(titre).strip() if pd.notna(titre) and str(titre).lower() != 'nan' else ""
+
+    # LOGIQUE INTELLIGENTE DE POSITIONNEMENT
+    can.setFillColorRGB(0, 0, 0) # Texte Noir
+    
+    if t_nom and t_titre:
+        # Cas complet : Nom + Titre
+        can.setFont("Helvetica-Bold", 18)
+        can.drawString(c_x + 5, c_y + 35, f"{t_pre} {t_nom}")
+        can.setFont("Helvetica", 12)
+        can.drawString(c_x + 5, c_y + 15, t_titre)
+    else:
+        # Cas Nom seul (centré verticalement pour faire joli)
+        can.setFont("Helvetica-Bold", 20)
+        can.drawString(c_x + 5, c_y + 25, f"{t_pre} {t_nom}".strip())
+
     can.save()
     packet.seek(0)
-    overlay = PdfReader(packet).pages[0]
-    out = PdfWriter()
-    page.merge_page(overlay)
-    out.add_page(page)
-    final = io.BytesIO()
-    out.write(final)
-    return final.getvalue()
+    
+    # 3. Fusionner le calque avec la page originale
+    overlay_pdf = PdfReader(packet)
+    page.merge_page(overlay_pdf.pages[0])
+    return page
 
 # --- TRAITEMENT DES DONNÉES ---
-data_ready = False
 df = pd.DataFrame()
+data_ready = False
 
 if mode == "Saisie Manuelle":
-    st.subheader("✍️ Saisie directe")
-    txt_input = st.text_area("Entrez les noms (Format: Nom, Prénom, Titre)", 
-                             placeholder="NOM, Prénom, Poste\nALEX, Jean, Directeur")
-    if txt_input:
-        lines = [line.split(',') for line in txt_input.split('\n') if ',' in line]
-        df = pd.DataFrame(lines, columns=['Nom', 'Prénom', 'Titre'])
+    txt = st.text_area("Entrez les noms (Format: Nom, Prénom, Titre)", 
+                       placeholder="Exemple:\nDUPONT, Jean, Directeur\nMARTIN, Sophie\nDURAND", height=150)
+    if txt:
+        lines = [line.split(',') for line in txt.split('\n') if line.strip()]
+        df = pd.DataFrame(lines)
+        # Gestion flexible des colonnes manquantes
+        cols = ['Nom', 'Prénom', 'Titre']
+        for i, col in enumerate(cols):
+            if i < len(df.columns):
+                df = df.rename(columns={i: col})
+            else:
+                df[col] = "" # Colonne vide si absente
         data_ready = True
 
 else:
-    st.subheader("📂 Chargement CSV")
-    csv_file = st.file_uploader("Charger votre liste d'employés", type="csv")
+    csv_file = st.file_uploader("📂 Chargez la liste Excel/CSV", type=["csv", "xlsx"])
     if csv_file:
         try:
-            # Correction de l'erreur d'accent (encoding latin-1)
-            df = pd.read_csv(csv_file, encoding='latin-1', sep=None, engine='python')
-            df.columns = [c.strip() for c in df.columns]
-            # Mapping intelligent des colonnes
-            col_nom = next((c for c in df.columns if "nom" in c.lower() and "pré" not in c.lower()), None)
-            col_pre = next((c for c in df.columns if "pré" in c.lower() or "pre" in c.lower()), None)
-            col_titre = next((c for c in df.columns if "titre" in c.lower()), None)
-            
-            if col_nom and col_pre and col_titre:
-                df = df.rename(columns={col_nom: 'Nom', col_pre: 'Prénom', col_titre: 'Titre'})
-                data_ready = True
+            # Lecture robuste (CSV ou Excel)
+            if csv_file.name.endswith('.csv'):
+                df = pd.read_csv(csv_file, encoding='latin-1', sep=None, engine='python')
             else:
-                st.error("Colonnes introuvables. Vérifiez que votre CSV contient : Nom, Prénom, Titre")
+                df = pd.read_excel(csv_file)
+            
+            # Nettoyage des colonnes
+            df.columns = [str(c).strip().title() for c in df.columns]
+            
+            # Recherche flexible des colonnes
+            mapping = {}
+            for col in df.columns:
+                if "nom" in col.lower() and "pré" not in col.lower(): mapping['Nom'] = col
+                if "pré" in col.lower() or "pre" in col.lower(): mapping['Prénom'] = col
+                if "titre" in col.lower() or "poste" in col.lower(): mapping['Titre'] = col
+            
+            # Création du dataframe standardisé
+            final_df = pd.DataFrame()
+            final_df['Nom'] = df[mapping['Nom']] if 'Nom' in mapping else ""
+            final_df['Prénom'] = df[mapping['Prénom']] if 'Prénom' in mapping else ""
+            final_df['Titre'] = df[mapping['Titre']] if 'Titre' in mapping else ""
+            
+            # On remplit le 'Nom' avec la première colonne si rien trouvé (secours)
+            if final_df['Nom'].isnull().all() and len(df.columns) > 0:
+                final_df['Nom'] = df.iloc[:, 0]
+                
+            df = final_df
+            data_ready = True
         except Exception as e:
-            st.error(f"Erreur : {e}")
+            st.error(f"Erreur de lecture du fichier : {e}")
 
-# --- FILTRE ET GÉNÉRATION ---
-if data_ready and pdf_file:
-    # Option de filtrage rapide
-    search = st.text_input("🔍 Filtrer la liste (ex: tapez 'A')")
-    if search:
-        df = df[df['Nom'].str.contains(search, case=False, na=False) | 
-                df['Prénom'].str.contains(search, case=False, na=False)]
+# --- AFFICHAGE ET GÉNÉRATION ---
+if data_ready and pdf_template:
+    st.write("---")
+    st.subheader("📋 Vérification avant génération")
     
-    st.write(f"### Liste à générer ({len(df)} badges)")
-    st.dataframe(df)
+    # Filtre optionnel
+    search = st.text_input("Filtrer (ex: Tapez 'A' pour les noms commençant par A)", "")
+    if search:
+        df = df[df['Nom'].str.contains(search, case=False, na=False) | df['Prénom'].str.contains(search, case=False, na=False)]
+    
+    st.info(f"{len(df)} badges prêts à être générés.")
+    st.dataframe(df.head())
 
-    if st.button("🚀 GÉNÉRER TOUS LES PDF"):
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as z:
-            for _, row in df.iterrows():
-                content = create_badge(pdf_file.getvalue(), row['Nom'], row['Prénom'], row['Titre'])
-                z.writestr(f"Badge_{row['Nom']}_{row['Prénom']}.pdf", content)
-        
-        st.download_button("📥 TÉLÉCHARGER LE ZIP", zip_buffer.getvalue(), "badges_gravure.zip")
+    # --- LE BOUTON MAGIQUE ---
+    # On prépare le PDF en mémoire
+    if st.checkbox("Je confirme les réglages, préparer le fichier final"):
+        with st.spinner("Création du PDF unique en cours..."):
+            output_pdf = PdfWriter()
+            
+            # On boucle sur chaque personne pour ajouter une page
+            for i, row in df.iterrows():
+                try:
+                    page = create_page(pdf_template.getvalue(), row.get('Nom', ''), row.get('Prénom', ''), row.get('Titre', ''))
+                    output_pdf.add_page(page)
+                except Exception as e:
+                    st.warning(f"Problème avec la ligne {i}: {e}")
+
+            # Sauvegarde en mémoire
+            final_buffer = io.BytesIO()
+            output_pdf.write(final_buffer)
+            final_buffer.seek(0)
+            
+            st.success("✅ Fichier PDF fusionné prêt !")
+            
+            # BOUTON TÉLÉCHARGEMENT DIRECT
+            st.download_button(
+                label="📥 TÉLÉCHARGER LE PDF UNIQUE (Tous les badges)",
+                data=final_buffer,
+                file_name="Tous_Les_Badges_Prets.pdf",
+                mime="application/pdf"
+            )
