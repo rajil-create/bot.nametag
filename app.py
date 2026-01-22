@@ -5,141 +5,115 @@ from reportlab.pdfgen import canvas
 from pypdf import PdfReader, PdfWriter
 import io
 
-st.set_page_config(page_title="Bot Remplacement Auto", layout="wide")
-st.title("🤖 Remplacement de Nom Automatique")
-st.info("Ce bot scanne le PDF pour trouver l'ancien nom et le remplacer exactement au même endroit.")
+st.set_page_config(page_title="Nametag Bot Pro", layout="wide")
+st.title("🛡️ Bot Nametag Pro (Auto-Fit & Multi-Pages)")
 
-# --- SIDEBAR : DONNÉES ---
-st.sidebar.header("1. Données")
-mode = st.sidebar.radio("Mode de saisie :", ["Liste Excel/CSV", "Saisie Manuelle"])
-ancien_nom_a_chercher = st.sidebar.text_input("Texte à remplacer (ex: Scott)", "Scott")
+# --- CONFIGURATION ---
+st.sidebar.header("1. Paramètres")
+nb_badges_total = st.sidebar.number_input("Nombre total de nametags voulus", min_value=1, value=1)
+text_to_replace = st.sidebar.text_input("Texte à repérer dans le PDF", "NOM")
 
-# --- CHARGEMENT PDF ---
-pdf_template = st.file_uploader("2. Glissez votre modèle (avec l'ancien nom)", type="pdf")
+st.sidebar.header("2. Source")
+mode = st.sidebar.radio("Source des noms :", ["Saisie Manuelle", "Excel/CSV"])
 
-def create_auto_badge(template_bytes, text_to_find, new_nom, new_prenom, new_titre):
-    # 1. On utilise pdfplumber pour TROUVER les coordonnées du texte
+# --- FONCTION DE CALCUL DE TAILLE (Comme le SVG) ---
+def get_fitted_size(text, max_width, base_size):
+    # Estimation conservatrice de la largeur
+    estimated_width = len(text) * base_size * 0.6 
+    size = base_size
+    while estimated_width > max_width and size > 7:
+        size -= 0.5
+        estimated_width = len(text) * size * 0.6
+    return size
+
+def create_pro_page(template_bytes, search_text, nom="", prenom="", titre=""):
+    # Trouver la position automatiquement
     found_box = None
-    
     with pdfplumber.open(io.BytesIO(template_bytes)) as pdf:
-        first_page = pdf.pages[0]
-        height = first_page.height
-        
-        # Recherche du mot exact
-        words = first_page.extract_words()
-        for word in words:
-            if text_to_find.lower() in word['text'].lower():
-                # On a trouvé le mot !
-                # pdfplumber donne: x0 (gauche), top (haut), x1 (droite), bottom (bas)
-                # Mais attention, l'origine Y est en HAUT pour plumber, et en BAS pour le PDF final
-                
-                # Conversion des coordonnées
-                x = word['x0'] - 10 # On élargit un peu la zone à effacer
-                y_reportlab = height - word['bottom'] - 5 # Inversion du Y + Marge
-                w = (word['x1'] - word['x0']) + 40 # Largeur + marge
-                h = (word['bottom'] - word['top']) + 20 # Hauteur + marge
-                
-                found_box = (x, y_reportlab, w, h)
-                break # On s'arrête au premier trouvé
-    
-    # 2. On prépare la "Rustine" (Patch)
-    reader = PdfReader(io.BytesIO(template_bytes))
-    page_source = reader.pages[0]
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=(page_source.mediabox.width, page_source.mediabox.height))
-    
-    if found_box:
-        (x, y, w, h) = found_box
-        # Carré blanc pour effacer l'ancien
-        can.setFillColorRGB(1, 1, 1)
-        can.rect(x, y, w, h, fill=1, stroke=0)
-        
-        # Nouveau Texte (Centré dans la zone trouvée)
-        full_text = f"{new_prenom} {new_nom}".strip()
-        if new_titre:
-             # Si titre, on écrit plus petit sur deux lignes
-            can.setFillColorRGB(0, 0, 0)
-            can.setFont("Helvetica-Bold", 14)
-            can.drawCentredString(x + w/2, y + h/2 + 5, full_text)
-            can.setFont("Helvetica", 10)
-            can.drawCentredString(x + w/2, y + h/2 - 10, str(new_titre))
-        else:
-            # Juste le nom, bien gros au milieu
-            can.setFillColorRGB(0, 0, 0)
-            can.setFont("Helvetica-Bold", 18)
-            can.drawCentredString(x + w/2, y + h/2 - 5, full_text)
-            
-    else:
-        # SI ON NE TROUVE PAS LE MOT (Sécurité)
-        # On écrit quand même en bas au milieu par défaut
-        can.setFont("Helvetica-Bold", 20)
-        can.drawCentredString(float(page_source.mediabox.width)/2, 50, f"{new_prenom} {new_nom} (Auto-placé)")
+        page_plumb = pdf.pages[0]
+        words = page_plumb.extract_words()
+        for w in words:
+            if search_text.lower() in w['text'].lower():
+                # On convertit les coordonnées vers ReportLab
+                found_box = (w['x0'], page_plumb.height - w['bottom'], w['x1'] - w['x0'], w['bottom'] - w['top'])
+                break
 
+    reader = PdfReader(io.BytesIO(template_bytes))
+    page = reader.pages[0]
+    packet = io.BytesIO()
+    can = canvas.Canvas(packet, pagesize=(page.mediabox.width, page.mediabox.height))
+
+    if found_box and (nom or prenom):
+        x, y, w, h = found_box
+        # 1. Effacer l'ancien (Cache blanc)
+        can.setFillColorRGB(1, 1, 1)
+        can.rect(x - 5, y - 5, w + 10, h + 15, fill=1, stroke=0)
+        
+        # 2. Préparer le texte
+        full_name = f"{prenom} {nom}".strip()
+        can.setFillColorRGB(0, 0, 0)
+        
+        # Ajustement automatique de la taille
+        f_size = get_fitted_size(full_name, w + 20, 18)
+        can.setFont("Helvetica-Bold", f_size)
+        
+        # Centrage dans la zone détectée
+        can.drawCentredString(x + w/2, y + 5, full_name)
+        
+        if titre:
+            can.setFont("Helvetica", f_size * 0.7)
+            can.drawCentredString(x + w/2, y - 10, str(titre))
+            
     can.save()
     packet.seek(0)
-    
-    # 3. Fusion
-    overlay = PdfReader(packet)
-    page_source.merge_page(overlay.pages[0])
-    
-    out = PdfWriter()
-    out.add_page(page_source)
-    final_buffer = io.BytesIO()
-    out.write(final_buffer)
-    return final_buffer.getvalue()
+    overlay = PdfReader(packet).pages[0]
+    page.merge_page(overlay)
+    return page
 
-# --- LOGIQUE PRINCIPALE ---
-df = pd.DataFrame()
-ready = False
-
+# --- LECTURE DES DONNÉES ---
+people = []
 if mode == "Saisie Manuelle":
-    txt = st.text_area("Collez votre liste ici :", "OLIVA, Richard, Directeur\nRAJI, Larbi")
+    txt = st.text_area("Entrez: Nom, Prénom, Titre (un par ligne)")
     if txt:
-        df = pd.DataFrame([row.split(',') for row in txt.split('\n') if row.strip()])
-        # Gestion colonnes dynamique
-        cols = ['Nom', 'Prénom', 'Titre']
-        for i, c in enumerate(cols):
-            if i < len(df.columns): df = df.rename(columns={i: c})
-            else: df[c] = ""
-        ready = True
+        for line in txt.split('\n'):
+            parts = [p.strip() for p in line.split(',')]
+            if parts[0]:
+                people.append({
+                    "Nom": parts[0], 
+                    "Prénom": parts[1] if len(parts)>1 else "", 
+                    "Titre": parts[2] if len(parts)>2 else ""
+                })
 else:
-    f = st.file_uploader("Fichier CSV/Excel", type=["csv", "xlsx"])
+    f = st.file_uploader("Upload Excel/CSV", type=["csv", "xlsx"])
     if f:
-        # Chargement simplifié
-        if f.name.endswith('.csv'): df = pd.read_csv(f, encoding='latin-1', header=None, sep=None, engine='python')
-        else: df = pd.read_excel(f, header=None)
-        
-        # On renomme arbitrairement 0->Nom, 1->Prenom, 2->Titre
-        mapping = {0:'Nom', 1:'Prénom', 2:'Titre'}
-        df = df.rename(columns=mapping)
-        for c in ['Nom','Prénom','Titre']: 
-            if c not in df.columns: df[c] = ""
-        ready = True
+        df = pd.read_csv(f, encoding='latin-1') if f.name.endswith('.csv') else pd.read_excel(f)
+        people = df.to_dict('records')
 
-# --- EXÉCUTION ---
-if ready and pdf_template:
-    st.success(f"Liste chargée : {len(df)} badges à faire.")
-    if st.button("🚀 LANCER LA DÉTECTION ET GÉNÉRATION"):
+# --- GÉNÉRATION ---
+pdf_template = st.file_uploader("3. Upload ton Modèle PDF", type="pdf")
+
+if pdf_template:
+    if st.button(f"🔥 GÉNÉRER LE PDF ({nb_badges_total} PAGES)"):
+        writer = PdfWriter()
         
-        zip_buffer = io.BytesIO()
-        # On utilise ZipFile cette fois car un PDF unique avec des formats différents mélangés est risqué
-        # Mais si tous les PDFs font la même taille, on pourrait fusionner.
-        # Restons sur le ZIP pour la sécurité si "plein de gabarits".
-        import zipfile
-        with zipfile.ZipFile(zip_buffer, "w") as z:
+        for i in range(nb_badges_total):
+            if i < len(people):
+                # Badge avec texte
+                p = people[i]
+                # On essaie de mapper les colonnes intelligemment
+                n = p.get('Nom') or p.get('name') or list(p.values())[0]
+                pr = p.get('Prénom') or p.get('prenom') or ""
+                t = p.get('Titre') or p.get('titre') or ""
+                new_page = create_pro_page(pdf_template.getvalue(), text_to_replace, n, pr, t)
+            else:
+                # Badge vide (juste le gabarit)
+                reader = PdfReader(io.BytesIO(pdf_template.getvalue()))
+                new_page = reader.pages[0]
             
-            progression = st.progress(0)
-            for i, row in df.iterrows():
-                try:
-                    pdf_bytes = create_auto_badge(
-                        pdf_template.getvalue(), 
-                        ancien_nom_a_chercher, # Le bot cherche "Scott"
-                        row['Nom'], row['Prénom'], row['Titre']
-                    )
-                    nom_fichier = f"Badge_{row['Nom']}.pdf"
-                    z.writestr(nom_fichier, pdf_bytes)
-                except Exception as e:
-                    st.error(f"Erreur sur {row['Nom']}: {e}")
-                progression.progress((i + 1) / len(df))
-                
-        st.download_button("📥 TÉLÉCHARGER LES BADGES (ZIP)", zip_buffer.getvalue(), "badges_auto.zip")
+            writer.add_page(new_page)
+        
+        final_pdf = io.BytesIO()
+        writer.write(final_pdf)
+        
+        st.success("✅ Terminé !")
+        st.download_button("📥 TÉLÉCHARGER LE PDF UNIQUE", final_pdf.getvalue(), "badges_complets.pdf")
