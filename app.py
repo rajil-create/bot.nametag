@@ -4,122 +4,118 @@ import pdfplumber
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ContentStream, TextStringObject
 import io
 
-st.set_page_config(page_title="Production Nametag PRO", layout="wide")
+st.set_page_config(page_title="Nametag Final Pro", layout="wide")
+
+# Paramètre de décalage industriel
 GAP = 0.5 * inch 
 
-def full_clean_pdf(page, target):
-    """ Supprime radicalement toute mention du texte cible dans le code du PDF """
-    if "/Contents" in page:
-        contents = page.get_contents()
-        if contents:
-            stream = ContentStream(contents, page.pdf)
-            for operands, operator in stream.operations:
-                if operator in [b"Tj", b"TJ"]:
-                    for i, op in enumerate(operands):
-                        if isinstance(op, TextStringObject) and target.lower() in op.lower():
-                            operands[i] = TextStringObject("")
-            page.set_contents(stream)
-
-def load_data(file):
-    """ Charge le CSV avec gestion robuste des accents français """
-    for enc in ['utf-8', 'latin-1', 'cp1252']:
+def load_csv_safely(file):
+    """ Règle l'erreur 'utf-8' codec can't decode """
+    for encoding in ['utf-8', 'latin-1', 'cp1252']:
         try:
             file.seek(0)
-            if file.name.endswith('.csv'):
-                return pd.read_csv(file, encoding=enc)
-            else:
-                return pd.read_excel(file)
+            return pd.read_csv(file, encoding=encoding)
         except:
             continue
     return None
 
-st.title("🛡️ Système de Production de Badges")
+def get_placeholder_metrics(template_bytes, search_term):
+    """ Trouve Scott pour savoir où nettoyer et où écrire """
+    with pdfplumber.open(io.BytesIO(template_bytes)) as pdf:
+        page = pdf.pages[0]
+        for w in page.extract_words():
+            if search_term.lower() in w['text'].lower():
+                return {
+                    "cx": (w['x0'] + w['x1']) / 2,
+                    "y": page.height - w['bottom'],
+                    "rect": (w['x0'] - 2, page.height - w['top'] + 2, w['x1'] - w['x0'] + 4, w['top'] - w['bottom'] + 4),
+                    "pw": page.width,
+                    "ph": page.height
+                }
+    return None
+
+st.title("🛡️ Bot de Production (Version Corrigée)")
 
 with st.sidebar:
-    st.header("Configuration")
-    target_to_fix = st.text_input("Texte à EFFACER (ex: Scott)", "Scott")
+    st.header("1. Réglages")
+    target = st.text_input("Texte à remplacer", "Scott")
     nb_total = st.number_input("Nombre de badges", value=6)
     cols = st.slider("Colonnes", 1, 3, 2)
-    font_size = st.number_input("Taille Nom", value=20)
-    
+    font_size = st.number_input("Taille police", value=18)
     st.divider()
-    mode = st.radio("Méthode d'entrée :", ["Taper les noms", "Uploader CSV/Excel"])
+    mode = st.radio("Entrée", ["Taper les noms", "Fichier CSV/Excel"])
 
-# --- GESTION DES DONNÉES ---
+# --- COLLECTE DES NOMS ---
 people = []
 if mode == "Taper les noms":
-    raw_text = st.text_area("Entrez: Prénom, Nom (un par ligne)", height=200, placeholder="Marc, Tremblay\nSophie, Gagnon")
-    if raw_text:
-        for line in raw_text.split('\n'):
+    txt = st.text_area("Prénom, Nom (un par ligne)")
+    if txt:
+        for line in txt.split('\n'):
             if ',' in line:
                 p = line.split(',')
-                people.append({"Prénom": p[0].strip(), "Nom": p[1].strip()})
+                people.append({"P": p[0].strip(), "N": p[1].strip()})
 else:
-    f = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
+    f = st.file_uploader("Upload CSV", type=["csv", "xlsx"])
     if f:
-        df = load_data(f)
+        df = load_csv_safely(f) if f.name.endswith('.csv') else pd.read_excel(f)
         if df is not None:
-            df.columns = [c.strip().capitalize() for c in df.columns]
             people = df.to_dict('records')
-        else:
-            st.error("Impossible de lire le fichier. Vérifiez le format.")
 
 # --- GÉNÉRATION ---
-tpl_file = st.file_uploader("Gabarit PDF (avec Scott)", type="pdf")
+tpl_file = st.file_uploader("Gabarit PDF", type="pdf")
 
-if tpl_file and st.button("🚀 Générer la Planche"):
-    with pdfplumber.open(io.BytesIO(tpl_file.getvalue())) as pdf:
-        p0 = pdf.pages[0]
-        # Détection position Scott
-        found = False
-        for w in p0.extract_words():
-            if target_to_fix.lower() in w['text'].lower():
-                mx = {"cx": (w['x0']+w['x1'])/2, "y": p0.height-w['bottom'], "w": p0.width, "h": p0.height}
-                found = True
-                break
-        
-    if not found:
-        st.error(f"Le mot '{target_to_fix}' n'a pas été trouvé. Vérifiez l'orthographe.")
+if tpl_file and st.button("🚀 Lancer la Production"):
+    m = get_placeholder_metrics(tpl_file.getvalue(), target)
+    
+    if not m:
+        st.error(f"Le mot '{target}' n'est pas détecté. Impossible de l'effacer.")
     else:
-        # Calcul page de sortie
         rows = (nb_total + cols - 1) // cols
-        pw = (mx['w'] * cols) + (GAP * (cols - 1)) + 40
-        ph = (mx['h'] * rows) + (GAP * (rows - 1)) + 40
+        page_w = (m['pw'] * cols) + (GAP * (cols - 1)) + 40
+        page_h = (m['ph'] * rows) + (GAP * (rows - 1)) + 40
         
-        reader = PdfReader(io.BytesIO(tpl_file.getvalue()))
-        tpl_page = reader.pages[0]
-        full_clean_pdf(tpl_page, target_to_fix) # Suppression réelle de "Scott"
+        # Création du calque de correction
+        packet = io.BytesIO()
+        can = canvas.Canvas(packet, pagesize=(page_w, page_h))
         
         writer = PdfWriter()
-        out_page = writer.add_blank_page(width=pw, height=ph)
-        
-        packet = io.BytesIO()
-        can = canvas.Canvas(packet, pagesize=(pw, ph))
+        out_page = writer.add_blank_page(width=page_w, height=page_h)
+        tpl_page = PdfReader(io.BytesIO(tpl_file.getvalue())).pages[0]
         
         for i in range(nb_total):
             c, r = i % cols, i // cols
-            dx = 20 + c * (mx['w'] + GAP)
-            dy = ph - 20 - (r + 1) * mx['h'] - (r * GAP)
+            dx = 20 + c * (m['pw'] + GAP)
+            dy = page_h - 20 - (r + 1) * m['ph'] - (r * GAP)
             
-            # Fond nettoyé
+            # 1. On pose le fond original
             out_page.merge_transformed_page(tpl_page, [1, 0, 0, 1, dx, dy])
             
-            # Nouveau texte
+            # 2. On dessine le "patch" blanc pour effacer Scott
+            can.setFillColorRGB(1, 1, 1) # Blanc
+            can.setStrokeColorRGB(1, 1, 1)
+            rx, ry, rw, rh = m['rect']
+            can.rect(dx + rx, dy + ry - rh, rw, rh, fill=1)
+            
+            # 3. On écrit le nouveau nom par-dessus le blanc
             if i < len(people):
                 pers = people[i]
-                nom = str(pers.get('Nom', '')).upper()
-                pre = str(pers.get('Prénom', ''))
+                # Gestion des noms de colonnes du CSV
+                nom = str(pers.get('Nom', pers.get('nom', ''))).upper()
+                pre = str(pers.get('Prénom', pers.get('prenom', '')))
+                can.setFillColorRGB(0, 0, 0) # Noir
                 can.setFont("Helvetica-Bold", font_size)
-                can.drawCentredString(dx + mx['cx'], dy + mx['y'], f"{pre} {nom}")
+                can.drawCentredString(dx + m['cx'], dy + m['y'], f"{pre} {nom}")
         
         can.save()
         packet.seek(0)
-        out_page.merge_page(PdfReader(packet).pages[0])
         
-        final = io.BytesIO()
-        writer.write(final)
-        st.success("Planche prête !")
-        st.download_button("📥 Télécharger PDF de Production", final.getvalue(), "badges_prod.pdf")
+        # Fusion finale
+        correction_layer = PdfReader(packet).pages[0]
+        out_page.merge_page(correction_layer)
+        
+        final_pdf = io.BytesIO()
+        writer.write(final_pdf)
+        st.success("✅ Planche de production prête !")
+        st.download_button("📥 Télécharger le PDF", final_pdf.getvalue(), "badges_ok.pdf")
