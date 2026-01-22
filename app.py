@@ -8,72 +8,77 @@ import zipfile
 st.set_page_config(page_title="Bot Graveur Pro", layout="wide")
 st.title("🛡️ Bot de Gravure Intelligent")
 
-# --- RÉGLAGES ---
-st.sidebar.header("⚙️ Configuration")
-search_term = st.sidebar.text_input("🔍 Filtrer par nom (ex: A ou Martin)", "")
+# --- BARRE LATÉRALE (FILTRES ET RÉGLAGES) ---
+st.sidebar.header("🔍 Recherche & Filtre")
+# Cette case permet de taper "A" pour ne voir que les noms commençant par A
+filtre_texte = st.sidebar.text_input("Taper un nom ou une lettre :", "")
 
-st.sidebar.subheader("Zone à effacer")
-cache_x = st.sidebar.slider("Position X", 0, 500, 135)
-cache_y = st.sidebar.slider("Position Y", 0, 300, 40)
-cache_largeur = st.sidebar.slider("Largeur", 10, 300, 250)
-cache_hauteur = st.sidebar.slider("Hauteur", 10, 100, 60)
+st.sidebar.header("⚙️ Réglages du Cache")
+c_x = st.sidebar.slider("Position X", 0, 500, 135)
+c_y = st.sidebar.slider("Position Y", 0, 300, 40)
+c_w = st.sidebar.slider("Largeur", 10, 300, 250)
+c_h = st.sidebar.slider("Hauteur", 10, 100, 60)
 
 # --- CHARGEMENT ---
 col1, col2 = st.columns(2)
 with col1:
-    template_file = st.file_uploader("1. Modèle PDF", type="pdf")
+    pdf_file = st.file_uploader("1. Modèle PDF", type="pdf")
 with col2:
     csv_file = st.file_uploader("2. Liste CSV", type="csv")
 
-def create_badge(template_bytes, nom, prenom, titre):
+def generer_un_pdf(template_bytes, n, p, t):
     reader = PdfReader(io.BytesIO(template_bytes))
     page = reader.pages[0]
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page.mediabox.width, page.mediabox.height))
-    # On cache l'ancien texte
+    # Effacer Richard Oliva
     can.setFillColorRGB(1, 1, 1)
-    can.rect(cache_x, cache_y, cache_largeur, cache_hauteur, fill=1, stroke=0)
-    # On écrit le nouveau
+    can.rect(c_x, c_y, c_w, c_h, fill=1, stroke=0)
+    # Écrire le nouveau nom
     can.setFillColorRGB(0, 0, 0)
     can.setFont("Helvetica-Bold", 18)
-    can.drawString(cache_x + 5, cache_y + 35, f"{prenom} {nom}")
+    can.drawString(c_x + 5, c_y + 35, f"{p} {n}")
     can.setFont("Helvetica", 12)
-    can.drawString(cache_x + 5, cache_y + 15, str(titre))
+    can.drawString(c_x + 5, c_y + 15, str(t))
     can.save()
     packet.seek(0)
     overlay = PdfReader(packet).pages[0]
-    output = PdfWriter()
+    out = PdfWriter()
     page.merge_page(overlay)
-    output.add_page(page)
-    out_io = io.BytesIO()
-    output.write(out_io)
-    return out_io.getvalue()
+    out.add_page(page)
+    final = io.BytesIO()
+    out.write(final)
+    return final.getvalue()
 
-if template_file and csv_file:
+if pdf_file and csv_file:
     try:
-        # Lecture flexible du CSV
-        df = pd.read_csv(csv_file)
-        # Nettoyage des noms de colonnes (enlève les espaces)
-        df.columns = df.columns.str.strip()
+        # Lecture automatique même si séparateur différent
+        df = pd.read_csv(csv_file, sep=None, engine='python')
+        # On nettoie les noms de colonnes (enlève espaces et met en minuscule pour comparer)
+        df.columns = [c.strip() for c in df.columns]
         
-        # Vérification des colonnes
-        if not all(col in df.columns for col in ['Nom', 'Prénom', 'Titre']):
-            st.error(f"Colonnes trouvées : {list(df.columns)}. Besoin de : 'Nom', 'Prénom', 'Titre'.")
-        else:
-            # FILTRE DE RECHERCHE
-            if search_term:
-                df = df[df['Nom'].str.startswith(search_term, na=False) | 
-                        df['Prénom'].str.startswith(search_term, na=False)]
-            
-            st.write(f"✅ {len(df)} employés sélectionnés")
-            st.dataframe(df.head()) # Affiche un aperçu
+        # On cherche les bonnes colonnes intelligemment
+        col_nom = next((c for c in df.columns if "nom" in c.lower() and "pré" not in c.lower()), None)
+        col_pre = next((c for c in df.columns if "pré" in c.lower() or "pre" in c.lower()), None)
+        col_titre = next((c for c in df.columns if "titre" in c.lower()), None)
 
-            if st.button("🚀 GÉNÉRER LES BADGES FILTRÉS"):
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w") as z:
+        if col_nom and col_pre and col_titre:
+            # APPLICATION DU FILTRE (ex: "A")
+            if filtre_texte:
+                df = df[df[col_nom].str.contains(filtre_texte, case=False, na=False) | 
+                        df[col_pre].str.contains(filtre_texte, case=False, na=False)]
+            
+            st.success(f"✅ {len(df)} employés trouvés")
+            st.dataframe(df[[col_nom, col_pre, col_titre]].head())
+
+            if st.button(f"🚀 GÉNÉRER {len(df)} BADGES"):
+                zip_path = io.BytesIO()
+                with zipfile.ZipFile(zip_path, "w") as z:
                     for _, row in df.iterrows():
-                        pdf_content = create_badge(template_file.getvalue(), row['Nom'], row['Prénom'], row['Titre'])
-                        z.writestr(f"Badge_{row['Nom']}.pdf", pdf_content)
-                st.download_button("📥 TÉLÉCHARGER LE ZIP", zip_buffer.getvalue(), "badges.zip")
+                        p_content = generer_un_pdf(pdf_file.getvalue(), row[col_nom], row[col_pre], row[col_titre])
+                        z.writestr(f"Badge_{row[col_nom]}.pdf", p_content)
+                st.download_button("📥 TÉLÉCHARGER LE ZIP", zip_path.getvalue(), "production.zip")
+        else:
+            st.error(f"Colonnes détectées : {list(df.columns)}. Vérifiez qu'il y a 'Nom', 'Prénom' et 'Titre'.")
     except Exception as e:
-        st.error(f"Erreur technique : {e}")
+        st.error(f"Erreur de lecture : {e}")
