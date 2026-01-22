@@ -2,128 +2,122 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 from pypdf import PdfReader, PdfWriter
 import io
+import re
 
-st.set_page_config(page_title="Nametag Precision Pro", layout="wide")
+st.set_page_config(page_title="Nametag Engine Pro", layout="wide")
 
-# --- INTERFACE ---
-st.title("🎯 Nametag Precision Pro")
-st.sidebar.header("Configuration")
-target_text = st.sidebar.text_input("Texte exact à remplacer", "NOM")
-nb_voulu = st.sidebar.number_input("Nombre de nametags total", min_value=1, value=4)
-cols_grid = st.sidebar.slider("Nombre de colonnes sur la page", 1, 3, 2)
+# --- LOGIQUE DE CALCUL (Inspirée de ton code GPT 5.2) ---
+def get_fitted_font_size(text, max_w, base_size, min_size=6):
+    """ Réduit la police jusqu'à ce que le texte rentre dans la largeur max """
+    # Estimation : Largeur = nombre de caractères * taille * facteur de correction
+    k = 0.55 # Facteur pour Helvetica-Bold
+    size = base_size
+    while (len(text) * size * k) > max_w and size > min_size:
+        size -= 0.5
+    return size
 
-mode = st.sidebar.radio("Source", ["Saisie Manuelle", "Fichier Excel/CSV"])
-
-# --- MOTEUR DE DÉTECTION ET POSITIONNEMENT ---
-def get_text_anchor(template_bytes, search_term):
-    """ Trouve le centre exact de l'ancien texte dans le PDF """
+def get_anchor_point(template_bytes, search_term):
+    """ Détecte où se trouve le texte placeholder dans le PDF """
     with pdfplumber.open(io.BytesIO(template_bytes)) as pdf:
         page = pdf.pages[0]
         words = page.extract_words()
         for w in words:
             if search_term.lower() in w['text'].lower():
-                # On calcule le centre X et la base Y
-                center_x = (w['x0'] + w['x1']) / 2
-                base_y = page.height - w['bottom'] # Inversion pour ReportLab
-                return center_x, base_y, (w['x1'] - w['x0'])
+                # On retourne le centre X, la base Y, et la largeur dispo
+                return {
+                    "cx": (w['x0'] + w['x1']) / 2,
+                    "y": page.height - w['bottom'], 
+                    "width": (w['x1'] - w['x0'])
+                }
     return None
 
-def draw_badge_content(can, x_anchor, y_anchor, max_w, nom, prenom, titre):
-    """ Écrit le texte exactement sur l'ancre """
-    full_name = f"{prenom} {nom}".strip()
-    # Calcul de la taille de police auto-fit
-    base_size = 18
-    estimated_w = len(full_name) * base_size * 0.55
-    font_size = base_size
-    while estimated_w > (max_w + 20) and font_size > 6:
-        font_size -= 0.5
-        estimated_w = len(full_name) * font_size * 0.55
+# --- UI STREAMLIT ---
+st.title("🛡️ Nametag Professional Engine")
+st.markdown("Structure de sortie : **Un seul PDF** contenant tous les badges demandés.")
 
-    # Écriture du Nom (Centré sur l'ancre)
-    can.setFillColorRGB(0, 0, 0)
-    can.setFont("Helvetica-Bold", font_size)
-    can.drawCentredString(x_anchor, y_anchor + 5, full_name)
+with st.sidebar:
+    st.header("Configuration")
+    target = st.text_input("Texte à repérer (ex: NOM)", "NOM")
+    total_wanted = st.number_input("Nombre de badges total à générer", min_value=1, value=6)
+    base_font = st.slider("Taille de police de base", 10, 40, 20)
     
-    # Écriture du Titre si présent
-    if titre:
-        can.setFont("Helvetica", font_size * 0.7)
-        can.drawCentredString(x_anchor, y_anchor - 12, str(titre))
+    st.divider()
+    mode = st.radio("Source des données", ["Saisie Manuelle", "Fichier Excel/CSV"])
 
-# --- GESTION DES DONNÉES ---
+# --- DATA PREP ---
 people = []
 if mode == "Saisie Manuelle":
-    txt = st.text_area("Format: Nom, Prénom, Titre")
-    if txt:
-        for line in txt.split('\n'):
-            p = [i.strip() for i in line.split(',')]
-            if p[0]: people.append({"N": p[0], "P": p[1] if len(p)>1 else "", "T": p[2] if len(p)>2 else ""})
+    raw_text = st.text_area("Collez ici (Nom, Prénom, Titre)")
+    if raw_text:
+        for line in raw_text.split('\n'):
+            if ',' in line:
+                parts = [p.strip() for p in line.split(',')]
+                people.append({"Nom": parts[0], "Prénom": parts[1] if len(parts)>1 else "", "Titre": parts[2] if len(parts)>2 else ""})
 else:
-    f = st.file_uploader("Upload Data", type=["csv", "xlsx"])
+    f = st.file_uploader("Upload Excel/CSV", type=["csv", "xlsx"])
     if f:
-        df = pd.read_csv(f, encoding='latin-1') if f.name.endswith('.csv') else pd.read_excel(f)
+        df = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
         people = df.to_dict('records')
 
-# --- GÉNÉRATION ---
-template_pdf = st.file_uploader("Upload Gabarit PDF", type="pdf")
+# --- GENERATION ---
+template_file = st.file_uploader("📁 Upload ton Gabarit PDF (Propre de préférence)", type="pdf")
 
-if template_pdf and st.button("🚀 Générer la planche de badges"):
-    # 1. Analyse du gabarit
-    anchor = get_text_anchor(template_pdf.getvalue(), target_text)
+if template_file and st.button(f"🚀 Générer {total_wanted} Nametags"):
+    # 1. Analyse du point d'ancrage
+    anchor = get_anchor_point(template_file.getvalue(), target)
+    
     if not anchor:
-        st.error(f"Le texte '{target_text}' n'a pas été trouvé dans le PDF.")
+        st.error(f"❌ Impossible de trouver '{target}' dans le gabarit. Vérifie l'orthographe.")
     else:
-        ax, ay, aw = anchor
-        reader = PdfReader(io.BytesIO(template_pdf.getvalue()))
-        tpl_page = reader.pages[0]
-        w_page = float(tpl_page.mediabox.width)
-        h_page = float(tpl_page.mediabox.height)
+        output_pdf = PdfWriter()
+        template_reader = PdfReader(io.BytesIO(template_file.getvalue()))
         
-        # 2. Création de la page finale
-        output_writer = PdfWriter()
-        packet = io.BytesIO()
-        can = canvas.Canvas(packet, pagesize=(w_page * cols_grid, h_page * ((nb_voulu // cols_grid) + 1)))
+        progress = st.progress(0)
         
-        # 3. Placement en grille
-        for i in range(nb_voulu):
-            col = i % cols_grid
-            row = i // cols_grid
+        for i in range(total_wanted):
+            # Prendre les infos si dispo, sinon badge vide
+            person = people[i] if i < len(people) else None
             
-            # Décalage de la grille
-            dx = col * w_page
-            dy = row * h_page # On peut ajuster pour que ça monte ou descende
+            # Créer une couche de texte transparente (Overlay)
+            packet = io.BytesIO()
+            tpl_page = template_reader.pages[0]
+            can = canvas.Canvas(packet, pagesize=(tpl_page.mediabox.width, tpl_page.mediabox.height))
             
-            # Dessiner le contenu du badge
-            p = people[i] if i < len(people) else {"N": "", "P": "", "T": ""}
-            # On simule le gabarit (Image ou Rect) - Ici on fusionnera après
-            # Pour la précision, on écrit directement aux coordonnées relatives
+            if person:
+                # Logique de fusion Nom + Prénom
+                nom = str(person.get('Nom', person.get('name', ''))).upper()
+                prenom = str(person.get('Prénom', person.get('prenom', '')))
+                full_text = f"{prenom} {nom}".strip()
+                titre = str(person.get('Titre', person.get('title', '')))
+                
+                # Calcul de la taille auto-fit (Comme dans ton SVG)
+                # On multiplie la largeur de l'ancre par 1.5 pour donner un peu de marge
+                f_size = get_fitted_font_size(full_text, anchor['width'] * 1.5, base_font)
+                
+                # Dessin du texte centré sur l'ancre
+                can.setFont("Helvetica-Bold", f_size)
+                can.drawCentredString(anchor['cx'], anchor['y'] + 2, full_text)
+                
+                if titre and titre.lower() != "nan":
+                    can.setFont("Helvetica", f_size * 0.6)
+                    can.drawCentredString(anchor['cx'], anchor['y'] - (f_size * 0.7), titre)
             
-            # Cache blanc sur l'ancien texte
-            can.setFillColorRGB(1, 1, 1)
-            can.rect(dx + ax - (aw/2) - 5, dy + ay - 5, aw + 10, 25, fill=1, stroke=0)
+            can.save()
+            packet.seek(0)
             
-            # Nouveau texte
-            draw_badge_content(can, dx + ax, dy + ay, aw, p.get('N',''), p.get('P',''), p.get('T',''))
+            # Fusionner l'overlay avec le gabarit original
+            new_overlay = PdfReader(packet).pages[0]
+            final_page = PdfReader(io.BytesIO(template_file.getvalue())).pages[0]
+            final_page.merge_page(new_overlay)
+            output_pdf.add_page(final_page)
+            
+            progress.progress((i + 1) / total_wanted)
 
-        can.save()
-        packet.seek(0)
-        
-        # 4. Fusion avec les fonds (Gabarits)
-        overlay_reader = PdfReader(packet)
-        new_page = output_writer.add_blank_page(width=w_page * cols_grid, height=h_page * ((nb_voulu // cols_grid) + 1))
-        
-        # On ajoute le fond pour chaque position
-        for i in range(nb_voulu):
-            col = i % cols_grid
-            row = i // cols_grid
-            new_page.merge_transformed_page(tpl_page, [1, 0, 0, 1, col * w_page, row * h_page])
-            
-        # On ajoute tout le texte d'un coup
-        new_page.merge_page(overlay_reader.pages[0])
-        
-        final_out = io.BytesIO()
-        output_writer.write(final_out)
-        
-        st.success("Planche générée !")
-        st.download_button("📥 Télécharger le PDF Unique", final_out.getvalue(), "planche_badges.pdf")
+        # Export final
+        final_buffer = io.BytesIO()
+        output_pdf.write(final_buffer)
+        st.success("✅ PDF Professionnel Généré !")
+        st.download_button("📥 Télécharger le PDF (Format Impression)", final_buffer.getvalue(), "nametags_production.pdf")
